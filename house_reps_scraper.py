@@ -2,15 +2,73 @@
 """
 美国众议院议员网站爬虫
 
-功能：爬取美国众议院网站上所有议员的个人官网链接，并保存为Excel文件
+功能：爬取美国众议院网站上所有议员的个人官网链接，并保存为CSV文件
 
 使用方法：
 1. 确保已安装Python 3
-2. 安装依赖：pip install requests beautifulsoup4 pandas openpyxl
-3. 运行脚本：python house_reps_scraper.py
+2. 运行脚本：python house_reps_scraper.py
+   （脚本会自动检测并安装所需依赖）
 
-输出：生成 house_representatives_websites.xlsx 文件，包含议员姓名、个人网站链接、选区、所属地区分类、政党和委员会信息
+输出：生成 house_representatives_websites.csv 文件，包含议员姓名、个人网站链接、选区、所属地区分类、政党和委员会信息
 """
+
+# ============================================
+# 第一部分：自动检测并安装依赖库
+# ============================================
+import subprocess
+import sys
+import importlib.util
+
+def check_and_install_dependencies():
+    """自动检测并安装所需依赖库"""
+    
+    # 定义需要检查的依赖 (模块导入名, pip包名)
+    dependencies = [
+        ("requests", "requests"),
+        ("bs4", "beautifulsoup4"),
+    ]
+    
+    print("=" * 50)
+    print("正在检查依赖库...")
+    print("=" * 50)
+    
+    need_install = []
+    
+    # 检测哪些库未安装
+    for module_name, package_name in dependencies:
+        spec = importlib.util.find_spec(module_name)
+        if spec is None:
+            print(f"  ✗ {module_name:15} 未安装")
+            need_install.append(package_name)
+        else:
+            print(f"  ✓ {module_name:15} 已安装")
+    
+    # 安装缺失的库
+    if need_install:
+        print("\n正在安装缺失的依赖库...")
+        for pkg in need_install:
+            print(f"  安装 {pkg}...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", pkg],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print(f"  ✓ {pkg} 安装成功")
+            except subprocess.CalledProcessError:
+                print(f"  ✗ {pkg} 安装失败")
+                print(f"\n错误：无法安装 {pkg}，请检查网络连接或手动运行：pip install {pkg}")
+                sys.exit(1)
+        print("\n所有依赖库安装完成！")
+    else:
+        print("\n所有依赖库已就绪！")
+    
+    print("=" * 50)
+    print()
+
+# 运行依赖检测和安装
+check_and_install_dependencies()
+
+# ============================================
+# 第二部分：主程序代码
+# ============================================
 
 # 首先创建一个日志文件，确认脚本开始执行
 with open('scraper_log.txt', 'w', encoding='utf-8') as log_file:
@@ -18,11 +76,8 @@ with open('scraper_log.txt', 'w', encoding='utf-8') as log_file:
 
 import requests
 from bs4 import BeautifulSoup
-import pandas as pd
 import csv
-import time
 import os
-import sys
 import re
 
 # 写入日志
@@ -46,49 +101,49 @@ US_TERRITORIES = [
 
 FEDERAL_DISTRICT = ["District of Columbia"]
 
-def get_region_category(state_name):
-    """根据州名返回地区分类"""
-    if state_name in US_STATES:
-        return "State"
-    elif state_name in US_TERRITORIES:
-        return "U.S. Territories"
-    elif state_name in FEDERAL_DISTRICT:
-        return "The Federal District"
-    else:
-        return "Unknown"
+# 所有有效地区名称（用于匹配）
+ALL_REGIONS = US_STATES + US_TERRITORIES + FEDERAL_DISTRICT
 
-def parse_district(district_text):
+def get_region_category(state_name):
     """
-    解析district文本，提取州名和选区
-    例如："North Carolina 12th" -> ("North Carolina", "12th")
-          "Alabama 4th" -> ("Alabama", "4th")
-          "Puerto Rico" -> ("Puerto Rico", "At-large")
+    根据州名返回地区分类
+    - 领地: us_territories
+    - 联邦特区: federal_district
+    - 州: state
+    """
+    if state_name in US_TERRITORIES:
+        return "us_territories"
+    elif state_name in FEDERAL_DISTRICT:
+        return "federal_district"
+    elif state_name in US_STATES:
+        return "state"
+    else:
+        return "unknown"
+
+def extract_state_from_district(district_text):
+    """
+    从district文本中提取州名
+    
+    例如：
+    - "North Carolina 12th" -> "North Carolina"
+    - "Alabama 4th" -> "Alabama"
+    - "Alaska at large" -> "Alaska"
+    - "Puerto Rico" -> "Puerto Rico"
+    - "District of Columbia" -> "District of Columbia"
     """
     if not district_text:
-        return "", ""
+        return ""
     
     district_text = district_text.strip()
     
-    # 匹配模式：州名 + 选区数字 + 序数词后缀
-    # 例如："North Carolina 12th", "Alabama 4th"
-    match = re.match(r'^(.+?)\s+(\d+)(?:st|nd|rd|th)$', district_text)
-    if match:
-        state = match.group(1).strip()
-        district_num = match.group(2)
-        # 确定序数词后缀
-        if district_num.endswith('1') and not district_num.endswith('11'):
-            suffix = 'st'
-        elif district_num.endswith('2') and not district_num.endswith('12'):
-            suffix = 'nd'
-        elif district_num.endswith('3') and not district_num.endswith('13'):
-            suffix = 'rd'
-        else:
-            suffix = 'th'
-        district = f"{district_num}{suffix}"
-        return state, district
+    # 首先尝试匹配完整的州名（包括多词州名）
+    # 按照州名长度降序排序，确保先匹配长的（如"North Carolina"先于"North"）
+    for state in sorted(ALL_REGIONS, key=len, reverse=True):
+        if district_text.startswith(state):
+            return state
     
-    # 如果没有匹配到数字选区，可能是 At-large 选区（如 Puerto Rico）
-    return district_text, "At-large"
+    # 如果没有匹配到，返回原文本（可能是异常情况）
+    return district_text
 
 def get_representatives():
     """获取众议院议员信息"""
@@ -178,9 +233,11 @@ def get_representatives():
                                 name = name_link.get_text(strip=True).replace('(link is external)', '').strip()
                                 website = name_link.get('href')
                                 
-                                # 解析 district 文本
-                                district_text = district_cell.get_text(strip=True)
-                                state, district = parse_district(district_text)
+                                # 获取完整的district文本（如"North Carolina 12th"）
+                                district_full = district_cell.get_text(strip=True)
+                                
+                                # 提取州名
+                                state = extract_state_from_district(district_full)
                                 
                                 # 确定地区分类
                                 region_category = get_region_category(state)
@@ -189,7 +246,7 @@ def get_representatives():
                                     representatives.append({
                                         "name": name,
                                         "website": website,
-                                        "district": district,
+                                        "district": district_full,  # 保存完整的district文本
                                         "state": state,
                                         "region_category": region_category,
                                         "party": party,
@@ -197,7 +254,7 @@ def get_representatives():
                                     })
                                     # 写入日志
                                     with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
-                                        log_file.write(f'添加众议员: {name} ({state}, {district}, {region_category})\n')
+                                        log_file.write(f'添加众议员: {name} ({state}, {district_full}, {region_category})\n')
         
         # 写入日志
         with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
@@ -215,9 +272,6 @@ def get_representatives():
             with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
                 log_file.write('尝试从 By State and District 视图提取数据...\n')
             
-            # 合并所有有效的地区名称
-            all_regions = US_STATES + US_TERRITORIES + FEDERAL_DISTRICT
-            
             current_state = ""
             
             # 遍历所有元素，寻找州名和众议员数据
@@ -226,7 +280,7 @@ def get_representatives():
                 if element.name in ['h2', 'h3']:
                     text = element.get_text(strip=True)
                     # 检查是否是有效的地区名称
-                    if text in all_regions:
+                    if text in ALL_REGIONS:
                         current_state = text
                         with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
                             log_file.write(f'识别到地区: {current_state}\n')
@@ -237,7 +291,7 @@ def get_representatives():
                     cells = element.find_all('td')
                     if len(cells) >= 6:  # 确保有足够的单元格
                         # 提取数据
-                        district = cells[0].get_text(strip=True)
+                        district_full = cells[0].get_text(strip=True)
                         name_cell = cells[1]
                         party = cells[2].get_text(strip=True)
                         office = cells[3].get_text(strip=True)
@@ -257,7 +311,7 @@ def get_representatives():
                                 representatives.append({
                                     "name": name,
                                     "website": website,
-                                    "district": district,
+                                    "district": district_full,  # 保存完整的district文本
                                     "state": current_state,
                                     "region_category": region_category,
                                     "party": party,
@@ -265,7 +319,7 @@ def get_representatives():
                                 })
                                 # 写入日志
                                 with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
-                                    log_file.write(f'添加众议员: {name} ({current_state}, {district}, {region_category})\n')
+                                    log_file.write(f'添加众议员: {name} ({current_state}, {district_full}, {region_category})\n')
             
             # 写入日志
             with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
@@ -291,11 +345,11 @@ def get_representatives():
     
     return unique_representatives
 
-def save_to_excel(representatives):
-    """保存议员信息到Excel文件"""
+def save_to_csv(representatives):
+    """保存议员信息到CSV文件"""
     # 写入日志
     with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
-        log_file.write('开始保存到Excel...\n')
+        log_file.write('开始保存到CSV...\n')
     
     if not representatives:
         # 写入日志
@@ -307,7 +361,7 @@ def save_to_excel(representatives):
     with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
         log_file.write(f'找到 {len(representatives)} 位众议员的网站链接\n')
     
-    # 保存为CSV格式（更可靠）
+    # 保存为CSV格式
     csv_file = os.path.join(os.getcwd(), "house_representatives_websites.csv")
     try:
         with open(csv_file, 'w', newline='', encoding='utf-8') as f:
@@ -328,36 +382,14 @@ def save_to_excel(representatives):
             log_file.write(f'已保存为CSV格式: {csv_file}\n')
         # 打印到控制台
         print(f'已保存为CSV格式: {csv_file}')
+        return True
     except Exception as e:
         # 写入日志
         with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
             log_file.write(f'保存CSV失败: {e}\n')
         # 打印到控制台
         print(f'保存CSV失败: {e}')
-    
-    # 尝试保存为Excel格式
-    try:
-        df = pd.DataFrame(representatives)
-        # 写入日志
-        with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
-            log_file.write('DataFrame创建成功\n')
-        
-        excel_file = os.path.join(os.getcwd(), "house_representatives_websites.xlsx")
-        df.to_excel(excel_file, index=False)
-        # 写入日志
-        with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
-            log_file.write(f'已保存为Excel格式: {excel_file}\n')
-        # 打印到控制台
-        print(f'已保存为Excel格式: {excel_file}')
-        return True
-    except Exception as e:
-        # 写入日志
-        with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
-            log_file.write(f'保存Excel失败: {e}\n')
-        # 打印到控制台
-        print(f'保存Excel失败: {e}')
-        # 即使Excel保存失败，只要CSV保存成功，就返回True
-        return True
+        return False
 
 def main():
     """主函数"""
@@ -369,8 +401,8 @@ def main():
         # 获取议员信息
         representatives = get_representatives()
         
-        # 保存到Excel
-        success = save_to_excel(representatives)
+        # 保存到CSV
+        success = save_to_csv(representatives)
         
         # 写入日志
         with open('scraper_log.txt', 'a', encoding='utf-8') as log_file:
